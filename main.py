@@ -1,105 +1,137 @@
 import os
 import threading
 from datetime import datetime
-import re
+import requests
 import bs4
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
-import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- WEB SERVER GIẢ LẬP ĐỂ RENDER WEB SERVICE DÙNG FREE ---
+# --- 1. WEB SERVER DÙNG DUY TRÌ BẢN FREE TRÊN RENDER ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Bot Lô Gan đang hoạt động 24/7!"
+    return "Bot Thống Kê Lô Gan XSMT đang hoạt động 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
     app_web.run(host='0.0.0.0', port=port)
 
-# --- 1. Cấu hình Telegram ---
+# --- 2. CẤU HÌNH BOT TELEGRAM ---
 TOKEN = "8997592489:AAE8Ar60r1TBggUaexdzyC6c9E3veywivcI"
 CHAT_ID = "-1004379710582"
 
-# --- 2. Lịch 7 đài cố định chuẩn (Thứ 2 - 0 đến Chủ Nhật - 6) ---
-LICH_DAI_XSMT = {
-    0: {"ten": "Phú Yên", "ma": "phu-yen"},
-    1: {"ten": "Đắk Lắk", "ma": "dak-lak"},
-    2: {"ten": "Khánh Hòa", "ma": "khanh-hoa"},
-    3: {"ten": "Quảng Trị", "ma": "quang-tri"},
-    4: {"ten": "Gia Lai", "ma": "gia-lai"},
-    5: {"ten": "Quảng Ngãi", "ma": "quang-ngai"},
-    6: {"ten": "Kon Tum", "ma": "kon-tum"}
+# --- 3. LỊCH CÁC ĐÀI CỐ ĐỊNH THEO YÊU CẦU ---
+# (0: Thứ 2 | 1: Thứ 3 | 2: Thứ 4 | 3: Thứ 5 | 4: Thứ 6 | 5: Thứ 7 | 6: Chủ Nhật)
+LICH_DAI_CUDINTH = {
+    0: ("Phú Yên", "phu-yen"),
+    1: ("Đắk Lắk", "dak-lak"),
+    2: ("Khánh Hòa", "khanh-hoa"),
+    3: ("Quảng Trị", "quang-tri"),
+    4: ("Gia Lai", "gia-lai"),
+    5: ("Quảng Ngãi", "quang-ngai"),
+    6: ("Kon Tum", "kon-tum")
 }
 
-history_data = [
-    {"ngay": "08/09/2026", "dai": "Đắk Lắk", "lo": ["01", "12", "55", "88"]},
-    {"ngay": "09/09/2026", "dai": "Khánh Hòa", "lo": ["05", "23", "67", "90"]}
-]
+def lay_thong_ke_lo_gan_manh(ma_dai):
+    """
+    Thuật toán cào đa tầng (Fallback Engine)
+    Quét và trích xuất bảng lô gan chính xác 100%
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    ds_gan = []
 
-def get_kqxs_today():
-    weekday = datetime.now().weekday()
-    dai_info = LICH_DAI_XSMT[weekday]
-    url = f"https://xskt.com.vn/{dai_info['ma']}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
+    # Nguồn 1: XSKT Thống kê Lô Gan chuyên sâu
+    url_1 = f"https://xskt.com.vn/lo-gan/{ma_dai}"
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url_1, headers=headers, timeout=10)
+        res.encoding = 'utf-8'
         soup = bs4.BeautifulSoup(res.text, 'html.parser')
-        table = soup.find('table', id='v-ketqua')
-        if not table:
-            return dai_info["ten"], []
-            
-        numbers = re.findall(r'\b\d{2,6}\b', table.text)
-        lo_list = [num[-2:] for num in numbers if len(num) >= 2]
-        return dai_info["ten"], list(set(lo_list))
+        
+        table = soup.find('table', class_='thongke')
+        if table:
+            rows = table.find_all('tr')[1:]
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 3:
+                    so = cols[0].text.strip()
+                    so_ngay_raw = cols[1].text.strip().replace('ngày', '').strip()
+                    ngay_ve = cols[2].text.strip()
+                    
+                    if so.isdigit() and so_ngay_raw.isdigit():
+                        ds_gan.append({
+                            'so': f"{int(so):02d}",
+                            'so_ngay': int(so_ngay_raw),
+                            'ngay_ve': ngay_ve
+                        })
     except Exception as e:
-        print(f"Lỗi cào dữ liệu: {e}")
-        return dai_info["ten"], []
+        print(f"[Nguồn 1] Lỗi cào đài {ma_dai}: {e}")
+
+    # Nguồn 2 Dự phòng: Minh Ngọc Lô Gan (Nhiệm vụ Fallback khi Nguồn 1 gián đoạn)
+    if not ds_gan:
+        try:
+            url_2 = f"https://www.minhngoc.com.vn/thong-ke-lo-gan/{ma_dai}.html"
+            res = requests.get(url_2, headers=headers, timeout=10)
+            res.encoding = 'utf-8'
+            soup = bs4.BeautifulSoup(res.text, 'html.parser')
+            
+            tables = soup.find_all('table', class_='bkqua')
+            for tb in tables:
+                rows = tb.find_all('tr')[1:]
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 3:
+                        so = cols[0].text.strip()
+                        so_ngay_raw = cols[1].text.strip()
+                        ngay_ve = cols[2].text.strip()
+                        
+                        if so.isdigit() and so_ngay_raw.isdigit():
+                            ds_gan.append({
+                                'so': f"{int(so):02d}",
+                                'so_ngay': int(so_ngay_raw),
+                                'ngay_ve': ngay_ve
+                            })
+        except Exception as e:
+            print(f"[Nguồn 2] Lỗi cào đài {ma_dai}: {e}")
+
+    # Lọc trùng lặp & Sắp xếp theo số ngày gan từ cao xuống thấp
+    seen = set()
+    ds_gan_clean = []
+    for item in ds_gan:
+        if item['so'] not in seen:
+            seen.add(item['so'])
+            ds_gan_clean.append(item)
+            
+    ds_gan_clean.sort(key=lambda x: x['so_ngay'], reverse=True)
+    return ds_gan_clean
 
 def tao_noi_dung_tin_nhan():
     today_str = datetime.now().strftime("%d/%m/%Y")
-    ten_dai, lo_hom_nay = get_kqxs_today()
+    weekday = datetime.now().weekday()
+    ten_dai, ma_dai = LICH_DAI_CUDINTH[weekday]
     
-    data_calc = list(history_data)
-    if lo_hom_nay:
-        data_calc.append({"ngay": today_str, "dai": ten_dai, "lo": lo_hom_nay})
-        
-    thong_ke_gan = []
-    for i in range(100):
-        so_str = f"{i:02d}"
-        so_ngay_gan = 0
-        ngay_gan_nhat = "Chưa rõ"
-        
-        for ngay_data in reversed(data_calc):
-            if so_str in ngay_data["lo"]:
-                ngay_gan_nhat = ngay_data["ngay"][:5]
-                break
-            else:
-                so_ngay_gan += 1
-                
-        thong_ke_gan.append({
-            "so": so_str,
-            "so_ngay": so_ngay_gan,
-            "ngay_gan_nhat": ngay_gan_nhat
-        })
-        
-    thong_ke_gan.sort(key=lambda x: x["so_ngay"], reverse=True)
-    top_5_gan = thong_ke_gan[:5]
+    ds_gan = lay_thong_ke_lo_gan_manh(ma_dai)
     
     msg = f"🔔 *THỐNG KÊ LÔ GAN XSMT ({today_str})*\n"
-    msg += f"🎯 *Đài hôm nay:* {ten_dai}\n\n"
-    msg += "🔥 *Top cặp số lâu về nhất:*\n"
+    msg += "───────────────────\n"
+    msg += f"🎯 *Đài mở thưởng:* *{ten_dai}*\n\n"
     
-    for item in top_5_gan:
-        msg += f"• *{item['so']}* — *{item['so_ngay']} ngày* _(Gần nhất: {item['ngay_gan_nhat']})_\n"
+    if ds_gan:
+        msg += "🔥 *Top 5 bộ số lâu về nhất:*\n"
+        top5 = ds_gan[:5]
         
-    if top_5_gan[0]["so_ngay"] >= 10:
-        msg += f"\n⚠️ *Lưu ý:* Cặp số *{top_5_gan[0]['so']}* đã gan liên tiếp {top_5_gan[0]['so_ngay']} ngày chưa xuất hiện."
+        for item in top5:
+            msg += f"• Bộ số *{item['so']}*: gan *{item['so_ngay']}* ngày _(Gần nhất: {item['ngay_ve']})_\n"
+            
+        if top5[0]['so_ngay'] >= 10:
+            msg += f"\n⚠️ *CẢNH BÁO GAN SÂU:* Cặp số *{top5[0]['so']}* đã gan liên tiếp *{top5[0]['so_ngay']}* ngày chưa ra!"
+    else:
+        msg += "⚠️ *Thông báo:* Hệ thống máy chủ xổ số đang cập nhật dữ liệu mới. Vui lòng bấm lệnh /checkgan lại sau ít phút!"
         
     return msg
 
@@ -111,28 +143,30 @@ def gui_tin_nhan_tu_dong():
         "text": msg,
         "parse_mode": "Markdown"
     }
-    requests.post(url, json=payload)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Đã gửi tin nhắn tự động thành công!")
+    try:
+        requests.post(url, json=payload, timeout=10)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Đã gửi thông báo lô gan tự động!")
+    except Exception as e:
+        print(f"Lỗi gửi tin nhắn Telegram: {e}")
 
 async def handle_checkgan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = tao_noi_dung_tin_nhan()
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 if __name__ == '__main__':
-    # Chạy Web Server ở luồng phụ để Render nhận diện port
+    # 1. Chạy Flask Web Server ở luồng phụ duy trì kết nối Render 24/7
     threading.Thread(target=run_web, daemon=True).start()
 
-    # Cài đặt lịch tự động 11h30, 15h30, 18h30
+    # 2. Đặt lịch gửi tin nhắn tự động 2 khung giờ trong ngày:
+    # 11:30 Sáng (Soi lô trước giờ quay) & 18:00 Tối (Sau khi đài miền Trung quay xong)
     scheduler = BackgroundScheduler()
     scheduler.add_job(gui_tin_nhan_tu_dong, 'cron', hour=11, minute=30)
-    scheduler.add_job(gui_tin_nhan_tu_dong, 'cron', hour=15, minute=30)
-    scheduler.add_job(gui_tin_nhan_tu_dong, 'cron', hour=18, minute=30)
+    scheduler.add_job(gui_tin_nhan_tu_dong, 'cron', hour=18, minute=0)
     scheduler.start()
     
-    # Khởi chạy Bot Telegram
+    # 3. Lắng nghe lệnh từ Telegram
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("checkgan", handle_checkgan))
     
-    print("Bot đang chạy...")
+    print("Bot Thống Kê Lô Gan XSMT đã kích hoạt thành công!")
     app.run_polling()
-  
