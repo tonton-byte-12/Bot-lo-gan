@@ -1,5 +1,6 @@
-requests
-beautifulsoup4
-python-telegram-bot
-apscheduler
-flask
+python-telegram-bot==20.7
+requests==2.31.0
+beautifulsoup4==4.12.3
+Flask==3.0.2
+apscheduler==3.10.4
+gunicorn==21.2.0
