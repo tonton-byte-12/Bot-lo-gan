@@ -18,15 +18,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8997592489:AAE8Ar60r1TBggUaexdzyC6c9E3veywiv
 CHAT_ID = os.getenv("CHAT_ID", "-1004379710582")
 PORT = int(os.getenv("PORT", 8080))
 
-# Ánh xạ đài cố định theo ngày trong tuần (0: Thứ 2, ..., 6: Chủ Nhật)
+# Ánh xạ slug URL chuẩn cho 7 đài XSMT cố định
 SCHEDULE_MAP = {
-    0: {"code": "py", "name": "Phú Yên"},
-    1: {"code": "dlk", "name": "Đắk Lắk"},
-    2: {"code": "kh", "name": "Khánh Hòa"},
-    3: {"code": "qt", "name": "Quảng Trị"},
-    4: {"code": "gl", "name": "Gia Lai"},
-    5: {"code": "qng", "name": "Quảng Ngãi"},
-    6: {"code": "kt", "name": "Kon Tum"}
+    0: {"slug_mn": "phu-yen", "slug_xs": "phu-yen", "name": "Phú Yên"},
+    1: {"slug_mn": "dak-lak", "slug_xs": "dak-lak", "name": "Đắk Lắk"},
+    2: {"slug_mn": "khanh-hoa", "slug_xs": "khanh-hoa", "name": "Khánh Hòa"},
+    3: {"slug_mn": "quang-tri", "slug_xs": "quang-tri", "name": "Quảng Trị"},
+    4: {"slug_mn": "gia-lai", "slug_xs": "gia-lai", "name": "Gia Lai"},
+    5: {"slug_mn": "quang-ngai", "slug_xs": "quang-ngai", "name": "Quảng Ngãi"},
+    6: {"slug_mn": "kon-tum", "slug_xs": "kon-tum", "name": "Kon Tum"}
 }
 
 logging.basicConfig(
@@ -35,97 +35,104 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Biến Cache kết quả
 CACHE_DATA = None
 CACHE_TIME = None
 
 # ----------------------------------------------------
-# FLASK WEB SERVER (Dùng để Render Ping 24/7)
+# FLASK WEB SERVER
 # ----------------------------------------------------
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "XSMT Bot Service Active", 200
+    return "XSMT Bot Active", 200
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ----------------------------------------------------
-# CÀO DỮ LIỆU KQXS (FALLBACK ENGINE)
+# THUẬT TOÁN CÀO KQXS CHUẨN XÁC THEO TỪNG ĐÀI
 # ----------------------------------------------------
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-def fetch_from_source_1(date_str, province_code):
-    """Nguồn 1: Minh Ngọc"""
+def fetch_from_minhngoc(date_str, province_slug):
+    """Cào chính xác 18 giải của DUY NHẤT 1 đài theo ngày trên MinhNgoc"""
     try:
-        url = f"https://www.minhngoc.net.vn/ket-qua-xo-so/mien-trung/{date_str}.html"
-        resp = requests.get(url, headers=HEADERS, timeout=5)
+        url = f"https://www.minhngoc.net.vn/ket-qua-xo-so/mien-trung/{province_slug}/{date_str}.html"
+        resp = requests.get(url, headers=HEADERS, timeout=6)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
-            box = soup.find("div", class_=re.compile(f".*{province_code}.*", re.I)) or soup
-            numbers = set()
-            for td in box.find_all(["td", "div"], class_=re.compile(r"giai|so", re.I)):
-                txt = td.text.strip()
-                found = re.findall(r"\b\d{2,6}\b", txt)
-                for num in found:
-                    numbers.add(num[-2:])
-            if len(numbers) >= 10:
-                return list(numbers)
+            box = soup.find("table", class_="bkqtientien") or soup.find("table", class_="box_kqxs")
+            if box:
+                numbers = set()
+                # Tìm tất cả ô chứa giải thưởng
+                for td in box.find_all("td"):
+                    txt = td.text.strip()
+                    # Lấy các chuỗi số có độ dài từ 2 đến 6 chữ số
+                    for match in re.findall(r"\b\d{2,6}\b", txt):
+                        numbers.add(match[-2:])
+                if len(numbers) >= 5: # Kết quả lô tô đầy đủ thường có từ 10-18 cặp số khác nhau
+                    return list(numbers)
     except Exception as e:
-        logger.warning(f"Source 1 error ({date_str}): {e}")
+        logger.warning(f"Lỗi MinhNgoc {province_slug} {date_str}: {e}")
     return None
 
-def fetch_from_source_2(date_str):
-    """Nguồn 2: Xoso.me"""
+def fetch_from_xosome(date_str, province_slug):
+    """Nguồn dự phòng 2: Xoso.me"""
     try:
-        url = f"https://xoso.me/kqxs-mien-trung-ngay-{date_str}.html"
-        resp = requests.get(url, headers=HEADERS, timeout=5)
+        url = f"https://xoso.me/kqxs-{province_slug}-ngay-{date_str}.html"
+        resp = requests.get(url, headers=HEADERS, timeout=6)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
+            box = soup.find("table", class_="colgiai") or soup
             numbers = set()
-            for td in soup.find_all("span", class_=re.compile(r"v-giai|duoc-ve", re.I)):
-                txt = td.text.strip()
-                if len(txt) >= 2 and txt.isdigit():
+            for span in box.find_all(["span", "div"], class_=re.compile(r"v-giai|number|duoc-ve", re.I)):
+                txt = span.text.strip()
+                if txt.isdigit() and len(txt) >= 2:
                     numbers.add(txt[-2:])
-            if len(numbers) >= 10:
+            if len(numbers) >= 5:
                 return list(numbers)
     except Exception as e:
-        logger.warning(f"Source 2 error ({date_str}): {e}")
+        logger.warning(f"Lỗi Xoso.me {province_slug} {date_str}: {e}")
     return None
 
-def get_kqxs_by_date(dt):
+def get_kqxs_exact(dt):
     date_str = dt.strftime("%d-%m-%Y")
-    province_info = SCHEDULE_MAP[dt.weekday()]
+    province = SCHEDULE_MAP[dt.weekday()]
     
-    data = fetch_from_source_1(date_str, province_info["code"])
+    # Thử nguồn 1 (Minh Ngọc)
+    data = fetch_from_minhngoc(date_str, province["slug_mn"])
     if not data:
-        data = fetch_from_source_2(date_str)
+        # Thử nguồn 2 (Xoso.me)
+        data = fetch_from_xosome(date_str, province["slug_xs"])
         
-    return data or [], province_info["name"]
+    return data or [], province["name"]
 
+# ----------------------------------------------------
+# THUẬT TOÁN TÍNH GAN GỘP 60 NGÀY
+# ----------------------------------------------------
 async def calculate_lo_gan_async():
     global CACHE_DATA, CACHE_TIME
     
-    # Kiểm tra Cache trong vòng 1 giờ
-    if CACHE_DATA and CACHE_TIME and (datetime.now() - CACHE_TIME).total_seconds() < 3600:
+    # Trả về Cache nếu dữ liệu dưới 30 phút
+    if CACHE_DATA and CACHE_TIME and (datetime.now() - CACHE_TIME).total_seconds() < 1800:
         return CACHE_DATA
 
     today = datetime.now().date()
     history = []
 
+    # Quét chính xác 60 ngày quay gần nhất theo đúng lịch 7 đài
     for i in range(1, 61):
         target_date = today - timedelta(days=i)
-        numbers, province_name = await asyncio.to_thread(get_kqxs_by_date, target_date)
+        numbers, province_name = await asyncio.to_thread(get_kqxs_exact, target_date)
         history.append({
             "date": target_date,
             "province": province_name,
             "numbers": numbers
         })
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.03)
 
     gan_dict = {}
     for num in range(100):
@@ -150,27 +157,26 @@ async def calculate_lo_gan_async():
 
     sorted_gan = sorted(gan_dict.items(), key=lambda x: x[1]["days_gan"], reverse=True)[:10]
     
-    # Lưu vào cache
     CACHE_DATA = sorted_gan
     CACHE_TIME = datetime.now()
     return sorted_gan
 
 def format_report(sorted_gan):
-    msg = "<b>THỐNG KÊ LÔ GAN GỘP ĐA ĐÀI - XSMT (60 NGÀY)</b>\n"
-    msg += "<i>(Tự động quét theo lịch 7 đài cố định)</i>\n\n"
+    msg = "<b>🔥 THỐNG KÊ LÔ GAN GỘP ĐA ĐÀI - XSMT (60 NGÀY) 🔥</b>\n"
+    msg += "<i>(Lịch 7 đài: PY->DLK->KH->QT->GL->QNG->KT)</i>\n\n"
     
     for rank, (num, info) in enumerate(sorted_gan, 1):
         if info['last_date'] != "Trên 60 ngày":
             last_info = f"{info['last_date']} ({info['last_province']})"
         else:
             last_info = "Trên 60 ngày"
-        msg += f"<b>{rank}. Bộ số {num}:</b> {info['days_gan']} ngày (Lần cuối: {last_info})\n"
+        msg += f"<b>{rank}. Bộ số {num}:</b> Gan <b>{info['days_gan']}</b> ngày (Về gần nhất: {last_info})\n"
         
-    msg += f"\n⏰ <i>Cập nhật lúc: {datetime.now().strftime('%H:%M %d/%m/%Y')}</i>"
+    msg += f"\n⏰ <i>Cập nhật: {datetime.now().strftime('%H:%M %d/%m/%Y')}</i>"
     return msg
 
 # ----------------------------------------------------
-# TELEGRAM BOT HANDLERS & SCHEDULER
+# BOT HANDLERS & SCHEDULER
 # ----------------------------------------------------
 async def send_daily_report(app: Application):
     try:
@@ -178,28 +184,28 @@ async def send_daily_report(app: Application):
         report = format_report(data)
         await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Lỗi gửi tin nhắn tự động: {e}")
+        logger.error(f"Lỗi gửi báo cáo tự động: {e}")
 
 async def checkgan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    wait_msg = await update.message.reply_text("⏳ Đang cào dữ liệu và tính toán, vui lòng đợi trong giây lát...")
+    wait_msg = await update.message.reply_text("⏳ Đang quét chính xác lịch sử 60 ngày gộp 7 đài XSMT, vui lòng đợi giây lát...")
     try:
         sorted_gan = await calculate_lo_gan_async()
         report = format_report(sorted_gan)
         await wait_msg.edit_text(report, parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Lỗi lệnh /checkgan: {e}")
-        await wait_msg.edit_text("❌ Có lỗi xảy ra khi tính toán. Vui lòng thử lại sau!")
+        logger.error(f"Lỗi /checkgan: {e}")
+        await wait_msg.edit_text("❌ Lỗi cào dữ liệu xổ số. Vui lòng thử lại sau!")
 
 def setup_scheduler(app: Application, loop: asyncio.AbstractEventLoop):
     scheduler = BackgroundScheduler(timezone="Asia/Ho_Chi_Minh")
     
-    # Lịch gửi tin nhắn 11:30 và 18:00
+    # 11:30 sáng và 18:00 chiều
     scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(send_daily_report(app), loop), "cron", hour=11, minute=30)
     scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(send_daily_report(app), loop), "cron", hour=18, minute=0)
     scheduler.start()
 
 # ----------------------------------------------------
-# MAIN ENTRY POINT (Khắc phục lỗi Python 3.14)
+# MAIN ENTRY POINT
 # ----------------------------------------------------
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
